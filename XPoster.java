@@ -193,6 +193,7 @@ public class XPoster {
     
     /**
      * Posts a tweet thread (splits long text into multiple tweets)
+     * All reply tweets are posted as replies to the FIRST (main) tweet.
      * @param text The full tweet text (can exceed 280 characters)
      * @param imagePath Optional image path (only attached to first tweet)
      * @return The response from Twitter API (last tweet in thread)
@@ -204,90 +205,89 @@ public class XPoster {
         int estimatedChunks = (int) Math.ceil(text.length() / 250.0); // Conservative estimate
         String maxIndicator = " (" + estimatedChunks + "/" + estimatedChunks + ")";
         int maxIndicatorLength = maxIndicator.length();
-        
+
         // Split text into chunks, leaving EXACT room for the longest possible indicator
         // This ensures NO text is lost when adding indicators
         int chunkMaxLength = 280 - maxIndicatorLength;
         List<String> chunks = splitIntoChunks(text, chunkMaxLength);
-        
+
         if (chunks.isEmpty()) {
             throw new IllegalArgumentException("Failed to split tweet text");
         }
-        
+
         // Now calculate the actual maximum indicator length based on real chunk count
         String actualMaxIndicator = " (" + chunks.size() + "/" + chunks.size() + ")";
         int actualMaxIndicatorLength = actualMaxIndicator.length();
-        
+
         // If actual is longer than estimated, we need to re-split with correct size
         if (actualMaxIndicatorLength > maxIndicatorLength) {
             chunkMaxLength = 280 - actualMaxIndicatorLength;
             chunks = splitIntoChunks(text, chunkMaxLength);
         }
-        
-        String lastTweetId = null;
+
+        String mainTweetId = null;  // Store the FIRST tweet's ID - all replies go to this
         String lastResponse = null;
-        
+
         for (int i = 0; i < chunks.size(); i++) {
             String chunk = chunks.get(i);
-            
+
             // Add thread indicator (e.g., " (1/3)", " (2/3)", " (3/3)")
             if (chunks.size() > 1) {
                 String indicator = " (" + (i + 1) + "/" + chunks.size() + ")";
                 // Chunk was split with exact room for indicator, so it should always fit
                 chunk = chunk + indicator;
-                
+
                 // Safety check: verify it doesn't exceed 280 (should never happen now)
                 if (chunk.length() > 280) {
-                    System.err.println("WARNING: Chunk + indicator exceeds 280 chars: " + chunk.length() + 
-                                      " (chunk: " + (chunk.length() - indicator.length()) + 
+                    System.err.println("WARNING: Chunk + indicator exceeds 280 chars: " + chunk.length() +
+                                      " (chunk: " + (chunk.length() - indicator.length()) +
                                       ", indicator: " + indicator.length() + ")");
                     // Trim to fit - this should never happen with correct calculation
                     chunk = chunk.substring(0, 280 - indicator.length()) + indicator;
                 }
             }
-            
+
             try {
-                // First tweet can have image, rest are replies
+                // First tweet can have image, rest are replies to the FIRST tweet
                 if (i == 0 && imagePath != null && checkImageExists(imagePath)) {
                     // First tweet with image - not a reply
                     lastResponse = postTweetWithImageAsReply(chunk, imagePath, null);
                 } else if (i > 0) {
-                    // This is a reply - we MUST have lastTweetId from previous tweet
-                    if (lastTweetId == null || lastTweetId.isEmpty()) {
-                        throw new IOException("Cannot post reply #" + (i + 1) + ": Failed to get tweet ID from previous tweet. Response: " + lastResponse);
+                    // This is a reply - reply to the MAIN (first) tweet, not the previous one
+                    if (mainTweetId == null || mainTweetId.isEmpty()) {
+                        throw new IOException("Cannot post reply #" + (i + 1) + ": Failed to get main tweet ID. Response: " + lastResponse);
                     }
-                    System.out.println("DEBUG: Posting reply #" + (i + 1) + " to tweet ID: " + lastTweetId);
-                    lastResponse = postSingleTweet(chunk, lastTweetId);
+                    System.out.println("DEBUG: Posting reply #" + (i + 1) + " to MAIN tweet ID: " + mainTweetId);
+                    lastResponse = postSingleTweet(chunk, mainTweetId);
                 } else {
                     // First tweet without image - not a reply
                     lastResponse = postSingleTweet(chunk, null);
                 }
-                
-                // Extract tweet ID from response - CRITICAL for threading replies
-                // This ID will be used for the NEXT reply
+
+                // Extract tweet ID from response
                 String extractedId = extractTweetId(lastResponse);
                 if (extractedId == null || extractedId.isEmpty()) {
                     throw new IOException("Failed to extract tweet ID from response for chunk " + (i + 1) + ". Cannot continue thread. Response: " + lastResponse);
                 }
                 System.out.println("DEBUG: Extracted tweet ID for chunk " + (i + 1) + ": " + extractedId);
-                lastTweetId = extractedId;
-                
+
+                // Store the FIRST tweet's ID - all subsequent replies will be to this tweet
+                if (i == 0) {
+                    mainTweetId = extractedId;
+                    System.out.println("DEBUG: Main tweet ID set to: " + mainTweetId);
+                }
+
                 // Delay between tweets to avoid rate limits
                 if (i < chunks.size() - 1) {
-                    if (i == 0) {
-                        // 5 minute delay between main tweet and first reply
-                        Thread.sleep(5 * 60 * 1000); // 5 minutes in milliseconds
-                    } else {
-                        // 2 second delay between subsequent replies
-                        Thread.sleep(2000);
-                    }
+                    // 3 second delay between all tweets in the thread
+                    Thread.sleep(3000);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IOException("Thread posting interrupted", e);
             }
         }
-        
+
         return lastResponse != null ? lastResponse : "";
     }
     
