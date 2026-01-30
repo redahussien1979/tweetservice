@@ -539,6 +539,9 @@ public class TwitterGUI extends JFrame {
     private void startScheduler() {
         scheduler = Executors.newScheduledThreadPool(1);
         scheduler.scheduleAtFixedRate(() -> {
+            // Cleanup stale lock files periodically
+            ScheduleStorage.cleanupStaleLocks();
+
             // Reload posted status from file to catch updates from other schedulers (MainService)
             // This prevents duplicate posting when both MainService and GUI are running
             List<ScheduledTweet> loadedTweets = ScheduleStorage.load();
@@ -564,17 +567,22 @@ public class TwitterGUI extends JFrame {
     }
     
     private void postScheduledTweet(ScheduledTweet tweet) {
-        // Prevent duplicate posting - mark as posting immediately
+        // Prevent duplicate posting - check if already posted or currently posting
         if (tweet.isPosted() || postingTweetIds.contains(tweet.getId())) {
             return; // Already posted or currently posting, skip
         }
-        
+
+        // Try to acquire a file-based lock to prevent Service from posting the same tweet
+        if (!ScheduleStorage.tryAcquirePostLock(tweet.getId())) {
+            System.out.println("Another process is already posting tweet: " + tweet.getId() + " - skipping");
+            return;
+        }
+
         // CRITICAL: Mark as posted in file IMMEDIATELY to prevent other schedulers from posting it
-        // This prevents duplicate posting when both MainService and GUI are running
         postingTweetIds.add(tweet.getId());
         tweet.setPosted(true);
         ScheduleStorage.save(scheduledTweets); // Save immediately to file
-        
+
         new Thread(() -> {
             try {
                 if (tweet.hasImage() && checkImageExists(tweet.getImagePath())) {
@@ -586,27 +594,31 @@ public class TwitterGUI extends JFrame {
                 ScheduleStorage.save(scheduledTweets); // Save again to ensure status is persisted
                 SwingUtilities.invokeLater(() -> {
                     updateScheduleTable();
-                    statusLabel.setText("✅ Scheduled tweet posted: " + tweet.getText().substring(0, Math.min(30, tweet.getText().length())) + "...");
+                    statusLabel.setText("Scheduled tweet posted: " + tweet.getText().substring(0, Math.min(30, tweet.getText().length())) + "...");
                     statusLabel.setForeground(new Color(0, 150, 0));
                 });
             } catch (Exception e) {
                 postingTweetIds.remove(tweet.getId()); // Remove from posting set on error
-                
+
                 String errorMsg = e.getMessage();
-                // If it's a rate limit error, keep it marked as posted to prevent retry spam
+                // IMPORTANT: Keep tweet marked as POSTED to prevent duplicate posting
+                // If the first tweet in a thread was already sent, retrying would create duplicates
                 if (errorMsg != null && errorMsg.contains("429")) {
-                    // Already marked as posted above, just save
-                    ScheduleStorage.save(scheduledTweets);
+                    System.out.println("Rate limit hit - tweet marked as posted to prevent duplicates");
                 } else {
-                    // For other errors, mark as NOT posted so it can be retried
-                    tweet.setPosted(false);
-                    ScheduleStorage.save(scheduledTweets);
+                    System.out.println("Error occurred - tweet marked as posted to prevent duplicate posting on retry");
                 }
-                
+                // Always keep as posted - never mark as not posted to avoid duplicates
+                ScheduleStorage.save(scheduledTweets);
+
                 SwingUtilities.invokeLater(() -> {
-                    statusLabel.setText("❌ Failed to post scheduled tweet: " + e.getMessage());
+                    updateScheduleTable();
+                    statusLabel.setText("Failed to post scheduled tweet: " + e.getMessage());
                     statusLabel.setForeground(new Color(220, 0, 0));
                 });
+            } finally {
+                // Always release the lock when done
+                ScheduleStorage.releasePostLock(tweet.getId());
             }
         }).start();
     }

@@ -1,8 +1,11 @@
 package com.twitter;
 
 import java.io.*;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -14,7 +17,9 @@ import java.util.List;
  */
 public class ScheduleStorage {
     private static final String SCHEDULE_FILE = "scheduled_tweets.dat";
+    private static final String LOCK_DIR = "locks";
     private static final DateTimeFormatter FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+    private static final long LOCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes - lock expires after this
     
     /**
      * Saves scheduled tweets to a file
@@ -113,6 +118,98 @@ public class ScheduleStorage {
         return str.replace("\\r", "\r")
                   .replace("\\n", "\n")
                   .replace("\\\\", "\\");
+    }
+
+    /**
+     * Attempts to acquire a lock for posting a specific tweet.
+     * Uses file-based locking to prevent duplicate posting between GUI and Service.
+     * @param tweetId The unique ID of the tweet to lock
+     * @return true if lock was acquired, false if another process is already posting this tweet
+     */
+    public static boolean tryAcquirePostLock(String tweetId) {
+        try {
+            // Create locks directory if it doesn't exist
+            File lockDir = new File(LOCK_DIR);
+            if (!lockDir.exists()) {
+                lockDir.mkdirs();
+            }
+
+            File lockFile = new File(LOCK_DIR, tweetId + ".lock");
+
+            // Check if lock file exists and is recent (not stale)
+            if (lockFile.exists()) {
+                long lockAge = System.currentTimeMillis() - lockFile.lastModified();
+                if (lockAge < LOCK_TIMEOUT_MS) {
+                    // Lock is still valid, another process is posting
+                    System.out.println("DEBUG: Lock exists for tweet " + tweetId + ", age: " + (lockAge / 1000) + "s");
+                    return false;
+                } else {
+                    // Lock is stale, remove it
+                    System.out.println("DEBUG: Removing stale lock for tweet " + tweetId);
+                    lockFile.delete();
+                }
+            }
+
+            // Try to create the lock file atomically
+            // createNewFile returns false if file already exists (atomic check-and-create)
+            boolean created = lockFile.createNewFile();
+            if (created) {
+                System.out.println("DEBUG: Acquired lock for tweet " + tweetId);
+                return true;
+            } else {
+                // Another process created the lock between our check and create
+                System.out.println("DEBUG: Failed to acquire lock for tweet " + tweetId + " (race condition)");
+                return false;
+            }
+        } catch (IOException e) {
+            System.err.println("ERROR: Failed to acquire lock for tweet " + tweetId + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Releases the lock for a specific tweet.
+     * @param tweetId The unique ID of the tweet to unlock
+     */
+    public static void releasePostLock(String tweetId) {
+        try {
+            File lockFile = new File(LOCK_DIR, tweetId + ".lock");
+            if (lockFile.exists()) {
+                lockFile.delete();
+                System.out.println("DEBUG: Released lock for tweet " + tweetId);
+            }
+        } catch (Exception e) {
+            System.err.println("ERROR: Failed to release lock for tweet " + tweetId + ": " + e.getMessage());
+        }
+    }
+
+    /**
+     * Cleans up all stale lock files (older than LOCK_TIMEOUT_MS).
+     * Should be called periodically to prevent lock file buildup.
+     */
+    public static void cleanupStaleLocks() {
+        try {
+            File lockDir = new File(LOCK_DIR);
+            if (!lockDir.exists()) {
+                return;
+            }
+
+            File[] lockFiles = lockDir.listFiles((dir, name) -> name.endsWith(".lock"));
+            if (lockFiles == null) {
+                return;
+            }
+
+            long now = System.currentTimeMillis();
+            for (File lockFile : lockFiles) {
+                long lockAge = now - lockFile.lastModified();
+                if (lockAge > LOCK_TIMEOUT_MS) {
+                    lockFile.delete();
+                    System.out.println("DEBUG: Cleaned up stale lock: " + lockFile.getName());
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("ERROR: Failed to cleanup stale locks: " + e.getMessage());
+        }
     }
 }
 

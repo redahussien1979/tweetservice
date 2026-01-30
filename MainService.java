@@ -107,6 +107,9 @@ public class MainService {
     private static void startScheduler() {
         scheduler = Executors.newScheduledThreadPool(1);
         scheduler.scheduleAtFixedRate(() -> {
+            // Cleanup stale lock files periodically
+            ScheduleStorage.cleanupStaleLocks();
+
             // Reload scheduled tweets from file (to pick up new tweets from GUI)
             List<ScheduledTweet> loadedTweets = ScheduleStorage.load();
             
@@ -195,28 +198,32 @@ public class MainService {
     }
     
     private static void postScheduledTweet(ScheduledTweet tweet) {
-        // Prevent duplicate posting - mark as attempting immediately
+        // Prevent duplicate posting - check if already posted
         if (tweet.isPosted()) {
             return; // Already posted, skip
         }
-        // Note: queuedTweetIds is already set by the scheduler before calling this method
-        
+
+        // Try to acquire a file-based lock to prevent GUI from posting the same tweet
+        if (!ScheduleStorage.tryAcquirePostLock(tweet.getId())) {
+            log("Another process is already posting tweet: " + tweet.getId() + " - skipping");
+            return;
+        }
+
         // CRITICAL: Mark as posted in file IMMEDIATELY to prevent other schedulers from posting it
-        // This prevents duplicate posting when both MainService and GUI are running
         tweet.setPosted(true);
         ScheduleStorage.save(scheduledTweets);
         log("Marked tweet as posting in file to prevent duplicates");
-        
+
         new Thread(() -> {
             try {
                 log("Posting scheduled tweet: " + tweet.getText().substring(0, Math.min(50, tweet.getText().length())) + "...");
-                
+
                 // Check if it's a thread (over 280 chars) - warn about multiple tweets
                 int tweetCount = (int) Math.ceil(tweet.getText().length() / 280.0);
                 if (tweetCount > 1) {
-                    log("⚠️ This tweet will be split into " + tweetCount + " tweets (thread)");
+                    log("This tweet will be split into " + tweetCount + " tweets (thread)");
                 }
-                
+
                 if (tweet.hasImage() && checkImageExists(tweet.getImagePath())) {
                     poster.postTweetWithImage(tweet.getText(), tweet.getImagePath());
                     log("Tweet with image posted successfully!");
@@ -224,33 +231,36 @@ public class MainService {
                     poster.postTweet(tweet.getText());
                     log("Tweet posted successfully!");
                 }
-                
+
                 // Remove from queued set since it's now posted
                 queuedTweetIds.remove(tweet.getId());
-                
+
                 // Save again to ensure status is persisted (already marked as posted above)
                 ScheduleStorage.save(scheduledTweets);
-                
+
             } catch (Exception e) {
                 String errorMsg = e.getMessage();
                 log("ERROR: Failed to post scheduled tweet: " + errorMsg);
-                
+
                 // Remove from queued set
                 queuedTweetIds.remove(tweet.getId());
-                
-                // If it's a rate limit error, keep it marked as posted to prevent retry spam
+
+                // IMPORTANT: Keep tweet marked as POSTED to prevent duplicate posting
+                // If the first tweet in a thread was already sent, retrying would create duplicates
+                // User should manually reschedule if they want to retry
                 if (errorMsg != null && errorMsg.contains("429")) {
-                    log("⚠️ Rate limit hit - keeping tweet marked as posted to prevent retry spam");
-                    // Already marked as posted above, just save
-                    ScheduleStorage.save(scheduledTweets);
+                    log("Rate limit hit - tweet marked as posted to prevent duplicates");
                 } else {
-                    // For other errors, mark as NOT posted so it can be retried
-                    log("⚠️ Marking tweet as not posted for retry on next scheduler run");
-                    tweet.setPosted(false);
-                    ScheduleStorage.save(scheduledTweets);
+                    log("Error occurred - tweet marked as posted to prevent duplicate posting on retry");
+                    log("If the tweet was not posted, please delete and reschedule it manually");
                 }
-                
+                // Always keep as posted - never mark as not posted to avoid duplicates
+                ScheduleStorage.save(scheduledTweets);
+
                 e.printStackTrace();
+            } finally {
+                // Always release the lock when done
+                ScheduleStorage.releasePostLock(tweet.getId());
             }
         }).start();
     }
