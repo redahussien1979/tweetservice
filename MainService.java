@@ -8,9 +8,11 @@ import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -27,7 +29,7 @@ public class MainService {
     private static ScheduledExecutorService scheduler;
     private static List<ScheduledTweet> scheduledTweets;
     private static XPoster poster;
-    private static Set<String> queuedTweetIds = new HashSet<>(); // Track tweets queued for delayed posting
+    private static Set<String> queuedTweetIds = ConcurrentHashMap.newKeySet(); // Thread-safe set for tracking queued tweets
     
     // TODO: Replace these with your actual Twitter API credentials
     private static final String API_KEY = "MR7E8GDIUaO0ocUTnMqpT8mrD";
@@ -72,8 +74,8 @@ public class MainService {
         // Create XPoster instance
         poster = new XPoster(apiKey, apiSecret, accessToken, accessTokenSecret);
         
-        // Load scheduled tweets from file (shared with GUI)
-        scheduledTweets = ScheduleStorage.load();
+        // Load scheduled tweets from file (shared with GUI) - use synchronized list for thread safety
+        scheduledTweets = Collections.synchronizedList(ScheduleStorage.load());
         log("Loaded " + scheduledTweets.size() + " scheduled tweet(s) from file");
         
         // Start scheduler
@@ -161,21 +163,21 @@ public class MainService {
                 }
             }
             
-            // Collect all passed tweets that haven't been posted or queued yet
-            List<ScheduledTweet> passedTweets = scheduledTweets.stream()
-                .filter(tweet -> !tweet.isPosted() && 
+            // Collect all tweets that are ready to post (scheduled time has passed)
+            // A tweet is ready if: not posted, not queued, and scheduled time is now or in the past
+            List<ScheduledTweet> readyTweets = scheduledTweets.stream()
+                .filter(tweet -> !tweet.isPosted() &&
                                 !queuedTweetIds.contains(tweet.getId()) &&
-                                !tweet.getScheduledTime().isAfter(now) &&
-                                tweet.getScheduledTime().plusSeconds(5).isBefore(now))
+                                !tweet.getScheduledTime().isAfter(now))
                 .sorted((t1, t2) -> t1.getScheduledTime().compareTo(t2.getScheduledTime())) // Sort by scheduled time (oldest first)
                 .collect(Collectors.toList());
             
-            // If we have passed tweets, schedule them with delays
-            if (!passedTweets.isEmpty()) {
-                log("Found " + passedTweets.size() + " passed scheduled tweet(s) - scheduling with " + DELAY_BETWEEN_PASSED_TWEETS_MINUTES + "-minute gaps");
-                
-                for (int i = 0; i < passedTweets.size(); i++) {
-                    ScheduledTweet tweet = passedTweets.get(i);
+            // If we have ready tweets, schedule them with delays to avoid rate limits
+            if (!readyTweets.isEmpty()) {
+                log("Found " + readyTweets.size() + " ready scheduled tweet(s) - scheduling with " + DELAY_BETWEEN_PASSED_TWEETS_MINUTES + "-minute gaps");
+
+                for (int i = 0; i < readyTweets.size(); i++) {
+                    ScheduledTweet tweet = readyTweets.get(i);
                     long delayMinutes = i * DELAY_BETWEEN_PASSED_TWEETS_MINUTES;
                     
                     // Mark as queued immediately to prevent duplicate queuing

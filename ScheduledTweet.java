@@ -2,6 +2,7 @@ package com.twitter;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Represents a scheduled tweet with text, image, and scheduled time
@@ -12,15 +13,17 @@ public class ScheduledTweet {
     private LocalDateTime scheduledTime;
     private boolean posted;
     private String id;
-    
+
     private static final DateTimeFormatter FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
-    
+    private static final AtomicLong ID_COUNTER = new AtomicLong(0);
+
     public ScheduledTweet(String text, String imagePath, LocalDateTime scheduledTime) {
         this.text = text;
         this.imagePath = imagePath;
         this.scheduledTime = scheduledTime;
         this.posted = false;
-        this.id = String.valueOf(System.currentTimeMillis());
+        // Generate unique ID: timestamp + counter to avoid collisions
+        this.id = System.currentTimeMillis() + "_" + ID_COUNTER.incrementAndGet();
     }
     
     public String getText() {
