@@ -17,8 +17,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.List;
-import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
@@ -320,8 +318,12 @@ public class XPoster {
             
             // Extract chunk and trim whitespace (preserves all text, just removes leading/trailing spaces)
             String chunk = text.substring(start, end).trim();
-            chunks.add(chunk);
-            
+
+            // Only add non-empty chunks
+            if (!chunk.isEmpty()) {
+                chunks.add(chunk);
+            }
+
             // Move start to end position (after the space if we broke at word boundary)
             // This ensures no characters are skipped
             start = end;

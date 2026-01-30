@@ -22,9 +22,10 @@ import java.awt.dnd.DropTargetDropEvent;
 import java.awt.dnd.DropTargetEvent;
 import java.awt.dnd.DropTargetListener;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -52,7 +53,7 @@ public class TwitterGUI extends JFrame {
     private JTable scheduleTable;
     private List<ScheduledTweet> scheduledTweets;
     private ScheduledExecutorService scheduler;
-    private Set<String> postingTweetIds = new HashSet<>(); // Track tweets currently being posted
+    private Set<String> postingTweetIds = ConcurrentHashMap.newKeySet(); // Thread-safe set for tracking tweets being posted
     
     public TwitterGUI(XPoster poster, String imagePath, boolean imageExists) {
         this.poster = poster;
@@ -62,8 +63,8 @@ public class TwitterGUI extends JFrame {
         }
         this.imageExists = imageExists;
         
-        // Load scheduled tweets from file (shared with service)
-        this.scheduledTweets = ScheduleStorage.load();
+        // Load scheduled tweets from file (shared with service) - use synchronized list for thread safety
+        this.scheduledTweets = Collections.synchronizedList(ScheduleStorage.load());
         
         initializeGUI();
         startScheduler();
@@ -712,13 +713,19 @@ public class TwitterGUI extends JFrame {
         }
         
         public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
-            ScheduledTweet tweet = scheduledTweets.get(row);
-            if (tweet.isPosted()) {
-                setText("Remove");
-                setBackground(new Color(108, 117, 125)); // Gray for posted tweets
+            // Bounds check to prevent IndexOutOfBoundsException
+            if (row >= 0 && row < scheduledTweets.size()) {
+                ScheduledTweet tweet = scheduledTweets.get(row);
+                if (tweet.isPosted()) {
+                    setText("Remove");
+                    setBackground(new Color(108, 117, 125)); // Gray for posted tweets
+                } else {
+                    setText("Cancel");
+                    setBackground(new Color(220, 53, 69)); // Red for pending tweets
+                }
             } else {
-                setText("Cancel");
-                setBackground(new Color(220, 53, 69)); // Red for pending tweets
+                setText("...");
+                setBackground(new Color(150, 150, 150));
             }
             setForeground(Color.WHITE);
             setFont(new Font("Segoe UI", Font.PLAIN, 11));
@@ -749,14 +756,20 @@ public class TwitterGUI extends JFrame {
         public Component getTableCellEditorComponent(JTable table, Object value, boolean isSelected, int row, int column) {
             this.row = row;
             this.table = table;
-            
-            ScheduledTweet tweet = scheduledTweets.get(row);
-            if (tweet.isPosted()) {
-                button.setText("Remove");
-                button.setBackground(new Color(108, 117, 125));
+
+            // Bounds check to prevent IndexOutOfBoundsException
+            if (row >= 0 && row < scheduledTweets.size()) {
+                ScheduledTweet tweet = scheduledTweets.get(row);
+                if (tweet.isPosted()) {
+                    button.setText("Remove");
+                    button.setBackground(new Color(108, 117, 125));
+                } else {
+                    button.setText("Cancel");
+                    button.setBackground(new Color(220, 53, 69));
+                }
             } else {
-                button.setText("Cancel");
-                button.setBackground(new Color(220, 53, 69));
+                button.setText("...");
+                button.setBackground(new Color(150, 150, 150));
             }
             button.setForeground(Color.WHITE);
             button.setFont(new Font("Segoe UI", Font.PLAIN, 11));
